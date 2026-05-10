@@ -54,6 +54,9 @@
 /* Protocol wire format. */
 #include "koe_packet.h"
 
+/* Session management. */
+#include "koe_session.h"
+
 /* Cryptographic primitives. */
 #include "koe_crypto.h"
 
@@ -157,6 +160,9 @@ typedef struct {
 /* koe_event_poll().  All sub-module state is owned here.                   */
 /* ---------------------------------------------------------------------- */
 
+/* Online presence and typing indicators. */
+#include "koe_presence.h"
+
 typedef struct {
     koe_config_t           cfg;
     koe_account_registry_t account_registry;
@@ -164,6 +170,7 @@ typedef struct {
     koe_contact_book_t     contacts;
     koe_transport_ctx_t    transport;
     koe_presence_table_t   presence;
+    koe_session_table_t    sessions;
     koe_queue_t            queue;
     koe_ghost_state_t      ghost;
     koe_plugin_registry_t  plugins;
@@ -299,6 +306,93 @@ int koe_group_create(koe_ctx_t  *ctx,
 int koe_group_send(koe_ctx_t  *ctx,
                     const char *room_id,
                     const char *text);
+
+/* ---------------------------------------------------------------------- */
+/* Session management                                                       */
+/* ---------------------------------------------------------------------- */
+
+/*
+ * koe_session_establish - Add an active session with a peer.
+ */
+int koe_session_establish(koe_ctx_t *ctx, const uint8_t peer_pk[KOE_ED25519_PK_LEN],
+                          const koe_session_t *sess);
+
+/*
+ * koe_session_active - Check if a session exists with a peer.
+ */
+int koe_session_active(koe_ctx_t *ctx, const uint8_t peer_pk[KOE_ED25519_PK_LEN]);
+
+/*
+ * koe_session_close - Remove session with a peer.
+ */
+void koe_session_close(koe_ctx_t *ctx, const uint8_t peer_pk[KOE_ED25519_PK_LEN]);
+
+/*
+ * koe_sessions_cleanup - Remove sessions older than max_age_seconds.
+ */
+void koe_sessions_cleanup(koe_ctx_t *ctx, int64_t max_age_seconds);
+
+/* ---------------------------------------------------------------------- */
+/* Handshake                                                                */
+/* ---------------------------------------------------------------------- */
+
+/*
+ * koe_handshake_start - Initiate a new handshake with a peer.
+ */
+int koe_handshake_start(koe_ctx_t *ctx, const uint8_t peer_pk[KOE_ED25519_PK_LEN],
+                        koe_packet_t *hello_out);
+
+/*
+ * koe_handshake_process - Process incoming handshake packet.
+ */
+int koe_handshake_process(koe_ctx_t *ctx, const koe_packet_t *in,
+                          koe_packet_t *out, int *complete_out);
+
+/* ---------------------------------------------------------------------- */
+/* Message send/recv                                                       */
+/* ---------------------------------------------------------------------- */
+
+/*
+ * koe_message_send_encrypted - Send an encrypted message to a peer.
+ */
+int koe_message_send_encrypted(koe_ctx_t *ctx, const uint8_t to[KOE_ED25519_PK_LEN],
+                               const uint8_t *body, size_t body_len,
+                               koe_packet_t *pkt_out);
+
+/*
+ * koe_message_recv_and_decrypt - Receive and decrypt a message.
+ */
+int koe_message_recv_and_decrypt(koe_ctx_t *ctx, const koe_packet_t *pkt,
+                                 koe_message_t *msg_out);
+
+/* ---------------------------------------------------------------------- */
+/* Peer management                                                          */
+/* ---------------------------------------------------------------------- */
+
+/*
+ * koe_peer_discover - Discover peers on local network.
+ */
+int koe_peer_discover(koe_ctx_t *ctx);
+
+/*
+ * koe_peer_connect - Connect to a peer by public key.
+ */
+int koe_peer_connect(koe_ctx_t *ctx, const uint8_t peer_pk[KOE_ED25519_PK_LEN]);
+
+/*
+ * koe_send_to_peer - Send a packet to a connected peer.
+ */
+int koe_send_to_peer(koe_ctx_t *ctx, const uint8_t peer_pk[KOE_ED25519_PK_LEN],
+                     const koe_packet_t *pkt);
+
+/* ---------------------------------------------------------------------- */
+/* Event loop                                                               */
+/* ---------------------------------------------------------------------- */
+
+/*
+ * koe_poll - Process pending events and cleanup.
+ */
+int koe_poll(koe_ctx_t *ctx, int timeout_ms);
 
 /* ---------------------------------------------------------------------- */
 /* Version query                                                             */

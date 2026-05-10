@@ -136,6 +136,7 @@ set(KOE_SOURCES
     src/koe_handshake.c
     src/koe_transport.c
     src/koe_presence.c
+    src/koe_session.c
     src/koe_message.c
     src/koe_queue.c
     src/koe_audio.c

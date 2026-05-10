@@ -111,6 +111,9 @@ int koe_init(koe_ctx_t *ctx, const koe_config_t *cfg)
     /* 9. Presence table. */
     koe_presence_init(&ctx->presence);
 
+    /* 10. Session table. */
+    koe_session_table_init(&ctx->sessions);
+
     /* 10. Redis cache (optional). */
     ctx->cache = koe_cache_open(&cfg->cache);
 
@@ -220,7 +223,11 @@ int koe_switch_account(koe_ctx_t *ctx, int idx, const char *passphrase)
 int64_t koe_send_text(koe_ctx_t *ctx, const uint8_t to[KOE_ED25519_PK_LEN],
                        const char *text, uint32_t destruct_ttl)
 {
-    if (!ctx->initialised) return -1;
+    if (!ctx || !ctx->initialised) return -1;
+    if (!to || !text) return -1;
+
+    koe_session_t *sess = koe_session_table_find(&ctx->sessions, to);
+    if (!sess) return -1;
 
     koe_message_t *msg = koe_message_alloc(KOE_MSG_TEXT, to,
                                             (const uint8_t *)text, strlen(text));
@@ -232,14 +239,8 @@ int64_t koe_send_text(koe_ctx_t *ctx, const uint8_t to[KOE_ED25519_PK_LEN],
 
     int64_t id = (int64_t)msg->id;
 
-    /* Try to deliver immediately; if the peer is unreachable, queue. */
-    koe_contact_t *contact = koe_contact_find(&ctx->contacts, to);
-    (void)contact;
-
-    /* Look up active session — simplified: build a dummy packet and push to queue. */
     koe_packet_t pkt;
-    koe_session_t dummy_sess = {0};
-    if (koe_message_encrypt(msg, &dummy_sess, &pkt) == 0) {
+    if (koe_message_encrypt(msg, sess, &pkt) == 0) {
         koe_queue_push(&ctx->queue, &pkt);
         koe_packet_free(&pkt);
     }
@@ -358,6 +359,188 @@ int koe_group_send(koe_ctx_t *ctx, const char *room_id, const char *text)
 }
 
 /* ---------------------------------------------------------------------- */
+/* ---------------------------------------------------------------------- */
+/* Peer and session management                                              */
+/* ---------------------------------------------------------------------- */
+
+int koe_session_establish(koe_ctx_t *ctx, const uint8_t peer_pk[KOE_ED25519_PK_LEN],
+                           const koe_session_t *sess)
+{
+    if (!ctx || !ctx->initialised) return -1;
+    if (!peer_pk || !sess) return -1;
+
+    return koe_session_table_add(&ctx->sessions, peer_pk, sess);
+}
+
+int koe_session_active(koe_ctx_t *ctx, const uint8_t peer_pk[KOE_ED25519_PK_LEN])
+{
+    if (!ctx || !ctx->initialised) return 0;
+    if (!peer_pk) return 0;
+
+    koe_session_t *sess = koe_session_table_find(&ctx->sessions, peer_pk);
+    return sess != NULL;
+}
+
+void koe_session_close(koe_ctx_t *ctx, const uint8_t peer_pk[KOE_ED25519_PK_LEN])
+{
+    if (!ctx || !ctx->initialised) return;
+    if (!peer_pk) return;
+
+    koe_session_table_remove(&ctx->sessions, peer_pk);
+}
+
+void koe_sessions_cleanup(koe_ctx_t *ctx, int64_t max_age_seconds)
+{
+    if (!ctx || !ctx->initialised) return;
+    koe_session_table_cleanup(&ctx->sessions, max_age_seconds);
+}
+
+/* ---------------------------------------------------------------------- */
+/* Handshake initiation                                                     */
+/* ---------------------------------------------------------------------- */
+
+int koe_handshake_start(koe_ctx_t *ctx, const uint8_t peer_pk[KOE_ED25519_PK_LEN],
+                        koe_packet_t *hello_out)
+{
+    if (!ctx || !ctx->initialised) return -1;
+    if (!peer_pk || !hello_out) return -1;
+
+    koe_handshake_t hs;
+    return koe_handshake_init(&hs, hello_out, &ctx->active_account.keys, peer_pk);
+}
+
+int koe_handshake_process(koe_ctx_t *ctx, const koe_packet_t *in,
+                          koe_packet_t *out, int *complete_out)
+{
+    if (!ctx || !ctx->initialised) return -1;
+    if (!in || !out) return -1;
+
+    if (in->header.type == KOE_TYPE_HELLO) {
+        koe_handshake_t hs;
+        koe_handshake_respond(&hs, out, in, &ctx->active_account.keys);
+
+        if (koe_handshake_finalise(&hs, out, &ctx->active_account.keys) == 0) {
+            koe_session_table_add(&ctx->sessions, in->header.from, &hs.session);
+            *complete_out = 1;
+        } else {
+            *complete_out = 0;
+        }
+        return 0;
+    }
+    else if (in->header.type == KOE_TYPE_HELLO_ACK) {
+        koe_handshake_t hs = {0};
+        if (koe_handshake_finalise(&hs, in, &ctx->active_account.keys) == 0) {
+            koe_session_table_add(&ctx->sessions, in->header.from, &hs.session);
+            *complete_out = 1;
+        } else {
+            *complete_out = 0;
+        }
+        return 0;
+    }
+
+    *complete_out = 0;
+    return 0;
+}
+
+/* ---------------------------------------------------------------------- */
+/* Message send/recv                                                       */
+/* ---------------------------------------------------------------------- */
+
+int koe_message_send_encrypted(koe_ctx_t *ctx, const uint8_t to[KOE_ED25519_PK_LEN],
+                               const uint8_t *body, size_t body_len,
+                               koe_packet_t *pkt_out)
+{
+    if (!ctx || !ctx->initialised) return -1;
+    if (!to || !body || body_len == 0 || !pkt_out) return -1;
+
+    koe_session_t *sess = koe_session_table_find(&ctx->sessions, to);
+    if (!sess) return -1;
+
+    koe_message_t *msg = koe_message_alloc(KOE_MSG_TEXT, to, body, body_len);
+    if (!msg) return -1;
+
+    memcpy(msg->from, ctx->active_account.keys.pk, KOE_ED25519_PK_LEN);
+    koe_message_sign(msg, &ctx->active_account.keys);
+
+    int rc = koe_message_encrypt(msg, sess, pkt_out);
+    koe_message_free(msg);
+
+    return rc;
+}
+
+int koe_message_recv_and_decrypt(koe_ctx_t *ctx, const koe_packet_t *pkt,
+                                 koe_message_t *msg_out)
+{
+    if (!ctx || !ctx->initialised) return -1;
+    if (!pkt || !msg_out) return -1;
+
+    koe_session_t *sess = koe_session_table_find(&ctx->sessions, pkt->header.from);
+    if (!sess) return -1;
+
+    return koe_message_decrypt(msg_out, pkt, sess);
+}
+
+/* ---------------------------------------------------------------------- */
+/* Transport send/recv wrappers                                            */
+/* ---------------------------------------------------------------------- */
+
+static koe_peer_t g_peers[KOE_MAX_SESSIONS];
+static int g_peer_count = 0;
+
+int koe_peer_discover(koe_ctx_t *ctx)
+{
+    (void)ctx;
+    g_peer_count = 0;
+    return 0;
+}
+
+int koe_peer_connect(koe_ctx_t *ctx, const uint8_t peer_pk[KOE_ED25519_PK_LEN])
+{
+    (void)ctx; (void)peer_pk;
+    if (g_peer_count >= KOE_MAX_SESSIONS) return -1;
+
+    memcpy(g_peers[g_peer_count].pk, peer_pk, KOE_ED25519_PK_LEN);
+    g_peers[g_peer_count].fd = -1;
+    g_peer_count++;
+
+    return 0;
+}
+
+int koe_send_to_peer(koe_ctx_t *ctx, const uint8_t peer_pk[KOE_ED25519_PK_LEN],
+                     const koe_packet_t *pkt)
+{
+    if (!ctx || !ctx->initialised) return -1;
+    if (!peer_pk || !pkt) return -1;
+
+    koe_session_t *sess = koe_session_table_find(&ctx->sessions, peer_pk);
+    if (!sess) return -1;
+
+    for (int i = 0; i < g_peer_count; i++) {
+        if (memcmp(g_peers[i].pk, peer_pk, KOE_ED25519_PK_LEN) == 0) {
+            if (g_peers[i].fd >= 0) {
+                return koe_transport_send(&g_peers[i], pkt);
+            }
+        }
+    }
+
+    return -1;
+}
+
+/* ---------------------------------------------------------------------- */
+/* Event loop                                                              */
+/* ---------------------------------------------------------------------- */
+
+int koe_poll(koe_ctx_t *ctx, int timeout_ms)
+{
+    if (!ctx || !ctx->initialised) return -1;
+
+    (void)timeout_ms;
+
+    koe_sessions_cleanup(ctx, 300);
+
+    return 0;
+}
+
 /* Version                                                                  */
 /* ---------------------------------------------------------------------- */
 
