@@ -1,6 +1,7 @@
 #include "koe_store.h"
 #include "koe_crypto.h"
 #include "koe_db.h"
+#include <sodium.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>

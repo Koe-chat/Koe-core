@@ -13,6 +13,7 @@
 
 #include "koe_matrix.h"
 #include "koe_crypto.h"
+#include <sodium.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>

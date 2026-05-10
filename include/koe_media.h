@@ -44,6 +44,9 @@
 
 #define KOE_MEDIA_CHUNK_SIZE        (64 * 1024)   /* 64 KiB per chunk         */
 #define KOE_MEDIA_MAX_FILE_SIZE     (512 * 1024 * 1024)  /* 512 MiB hard cap  */
+#ifndef KOE_MEDIA_PORT
+#define KOE_MEDIA_PORT        9476    /* P2P file transfer - same as transport */
+#endif
 #define KOE_MEDIA_FILENAME_MAX      256
 #define KOE_MEDIA_MIME_MAX          128
 #define KOE_MEDIA_HASH_LEN          32            /* SHA-256                   */

@@ -4,6 +4,7 @@
 
 #include "koe_packet.h"
 #include "koe_version.h"
+#include <sodium.h>
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>

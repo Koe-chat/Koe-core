@@ -1,5 +1,6 @@
 #include "koe_channel.h"
 #include "koe_crypto.h"
+#include <sodium.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
